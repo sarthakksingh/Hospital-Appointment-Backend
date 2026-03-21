@@ -1,43 +1,46 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
-from sqlalchemy import func
 from app.database import get_db
 from app.models import Doctor, Appointment, User
 from app.schemas import AppointmentCreate, AppointmentReschedule
 from app.agent import trigger_agent
+from app.auth import get_current_user
 from datetime import datetime, timedelta
 
 router = APIRouter(prefix="", tags=["Patient"])
 
 
-# ✅ Get all doctors
+
 @router.get("/doctors")
 def get_doctors(db: Session = Depends(get_db)):
-    doctors = db.query(Doctor).all()
-    return doctors
+    return db.query(Doctor).all()
 
 
-# ✅ Get doctor availability
 @router.get("/doctors/{doctor_id}/availability")
 def get_availability(doctor_id: int, db: Session = Depends(get_db)):
     doctor = db.query(Doctor).filter(Doctor.id == doctor_id).first()
     if not doctor:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Doctor with id {doctor_id} not found"
-        )
+        raise HTTPException(status_code=404, detail=f"Doctor with id {doctor_id} not found")
     return {"doctor_id": doctor_id, "availability": doctor.availability}
 
 
-# ✅ Book appointment
 @router.post("/appointments/book", status_code=201)
-def book_appointment(data: AppointmentCreate, db: Session = Depends(get_db)):
-    # Verify patient exists
+def book_appointment(
+    data: AppointmentCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+
+    if current_user.id != data.patient_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You can only book appointments for yourself"
+        )
+
     patient = db.query(User).filter(User.id == data.patient_id).first()
     if not patient:
         raise HTTPException(status_code=404, detail="Patient not found")
 
-    # Verify doctor exists
     doctor = db.query(Doctor).filter(Doctor.id == data.doctor_id).first()
     if not doctor:
         raise HTTPException(status_code=404, detail="Doctor not found")
@@ -52,7 +55,6 @@ def book_appointment(data: AppointmentCreate, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(appt)
 
-    # Trigger n8n appointment reminder workflow
     trigger_agent({
         "appointment_id": appt.id,
         "patient_id": data.patient_id,
@@ -66,18 +68,28 @@ def book_appointment(data: AppointmentCreate, db: Session = Depends(get_db)):
     return {"message": "Appointment Booked Successfully", "appointment_id": appt.id}
 
 
-# ✅ Reschedule appointment
+
 @router.put("/appointments/reschedule")
-def reschedule_appointment(data: AppointmentReschedule, db: Session = Depends(get_db)):
+def reschedule_appointment(
+    data: AppointmentReschedule,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
     appt = db.query(Appointment).filter(Appointment.id == data.appointment_id).first()
     if not appt:
         raise HTTPException(status_code=404, detail="Appointment not found")
+
+
+    if appt.patient_id != current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You can only reschedule your own appointments"
+        )
 
     appt.date_time = data.new_date_time
     appt.status = "rescheduled"
     db.commit()
 
-    # Trigger n8n rescheduled reminder
     trigger_agent({
         "appointment_id": appt.id,
         "new_date_time": str(data.new_date_time),
@@ -87,18 +99,24 @@ def reschedule_appointment(data: AppointmentReschedule, db: Session = Depends(ge
     return {"message": "Appointment Rescheduled Successfully"}
 
 
-# ✅ Get appointments for a specific patient (for dashboard + bookings page)
+
 @router.get("/appointments/my/{patient_id}")
-def get_my_appointments(patient_id: int, db: Session = Depends(get_db)):
-    patient = db.query(User).filter(User.id == patient_id).first()
-    if not patient:
-        raise HTTPException(status_code=404, detail="Patient not found")
+def get_my_appointments(
+    patient_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+
+    if current_user.id != patient_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You can only view your own appointments"
+        )
 
     appointments = db.query(Appointment).filter(
         Appointment.patient_id == patient_id
     ).all()
 
-    # Enrich with doctor name
     result = []
     for appt in appointments:
         doctor = db.query(Doctor).filter(Doctor.id == appt.doctor_id).first()
@@ -114,7 +132,30 @@ def get_my_appointments(patient_id: int, db: Session = Depends(get_db)):
     return result
 
 
-# ✅ Get tomorrow's appointments (used by n8n Appointment Reminder workflow)
+
+@router.put("/appointments/cancel/{appointment_id}")
+def cancel_appointment(
+    appointment_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    appt = db.query(Appointment).filter(Appointment.id == appointment_id).first()
+    if not appt:
+        raise HTTPException(status_code=404, detail="Appointment not found")
+
+    if appt.patient_id != current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You can only cancel your own appointments"
+        )
+
+    appt.status = "cancelled"
+    db.commit()
+
+    return {"message": "Appointment Cancelled Successfully"}
+
+
+
 @router.get("/appointments/tomorrow")
 def get_tomorrow_appointments(db: Session = Depends(get_db)):
     tomorrow = datetime.utcnow().date() + timedelta(days=1)
@@ -140,16 +181,3 @@ def get_tomorrow_appointments(db: Session = Depends(get_db)):
         })
 
     return result
-
-
-# ✅ Cancel appointment
-@router.put("/appointments/cancel/{appointment_id}")
-def cancel_appointment(appointment_id: int, db: Session = Depends(get_db)):
-    appt = db.query(Appointment).filter(Appointment.id == appointment_id).first()
-    if not appt:
-        raise HTTPException(status_code=404, detail="Appointment not found")
-
-    appt.status = "cancelled"
-    db.commit()
-
-    return {"message": "Appointment Cancelled Successfully"}
