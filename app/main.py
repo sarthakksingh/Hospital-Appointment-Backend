@@ -6,6 +6,8 @@ from slowapi.errors import RateLimitExceeded
 from app.database import Base, engine
 from app import patient, doctor, auth
 from app import doctor_routes  # ← new authenticated doctor router
+from app import admin_routes
+
 
 limiter = Limiter(key_func=get_remote_address)
 
@@ -33,6 +35,7 @@ app.include_router(auth.router)
 app.include_router(patient.router)
 app.include_router(doctor.router)
 app.include_router(doctor_routes.router)   # ← /doctor/* authenticated routes
+app.include_router(admin_routes.router)
 
 
 @app.get("/")
