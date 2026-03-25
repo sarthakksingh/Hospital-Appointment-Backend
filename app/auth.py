@@ -114,11 +114,7 @@ def login(request: Request, data: UserLogin, db: Session = Depends(get_db)):
 
 @router.post("/google-login", response_model=TokenResponse)
 def google_login(data: FirebaseLoginRequest, db: Session = Depends(get_db)):
-    """
-    Accepts a Firebase ID token from frontend Google Sign-In.
-    Verifies it with Firebase Admin SDK.
-    Creates user in DB if first time, then returns our own JWT.
-    """
+ 
     # Verify token with Firebase
     decoded = verify_firebase_token(data.id_token)
  
@@ -131,20 +127,24 @@ def google_login(data: FirebaseLoginRequest, db: Session = Depends(get_db)):
  
     # Check if user exists, create if not
     user = db.query(User).filter(User.email == email).first()
- 
+
     if not user:
-        # First time Google login — auto create account
-        user = User(
-            name=name,
-            email=email,
-            phone=None,
-            hashed_password=hash_password(os.urandom(32).hex()),  # random password
-            role="PATIENT"
-        )
-        db.add(user)
-        db.commit()
-        db.refresh(user)
- 
+        try:
+            user = User(
+                name=name,
+                email=email,
+                phone=None,
+                hashed_password=hash_password(os.urandom(32).hex()),
+                role="PATIENT"
+            )
+            db.add(user)
+            db.commit()
+            db.refresh(user)
+        except Exception:
+            db.rollback()
+            # User was created by a concurrent request, just fetch them
+            user = db.query(User).filter(User.email == email).first()
+
     # Issue our own JWT
     token = create_token({"sub": str(user.id), "role": user.role})
  
